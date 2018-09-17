@@ -130,8 +130,8 @@ class SwiftTemplateTests: QuickSpec {
                     try Generator.generate(Types(types: []), template: SwiftTemplate(path: templatePath))
                     }
                     .to(throwError(closure: { (error) in
-                        let path = Path.cleanTemporaryDir(name: "build").parent() + "SwiftTemplate.build/main.swift"
-                        expect("\(error)").to(equal("\(path):6:19: error: expected expression in list of expressions\n        print(\"\\( )\", terminator: \"\");\n                  ^\n"))
+                        let path = Path.cleanTemporaryDir(name: "build").parent() + "SwiftTemplate.build/Sources/SwiftTemplate/main.swift"
+                        expect("\(error)").to(contain("\(path):6:19: error: expected expression in list of expressions\n        print(\"\\( )\", terminator: \"\");\n                  ^\n"))
                     }))
             }
 
