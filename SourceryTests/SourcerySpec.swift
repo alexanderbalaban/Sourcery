@@ -859,7 +859,7 @@ class SourcerySpecTests: QuickSpec {
             context("given project") {
                 it("links generated files") {
                     // swiftlint:disable:next force_try
-                    let sources = try! Source(dict: [
+                    let sources = try! Source.create(with: [
                         "project": [
                             "file": "TestProject.xcodeproj",
                             "target": ["name": "TestProject"]

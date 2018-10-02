@@ -10,6 +10,10 @@ struct Project {
     let targets: [Target]
     let exclude: [Path]
 
+    let name: String
+    private(set) var output: Output?
+    private(set) var dependencies: [Project] = []
+
     struct Target {
         let name: String
         let module: String
@@ -47,8 +51,17 @@ struct Project {
         let path = Path(file, relativeTo: relativePath)
         self.file = try XcodeProj(path: path)
         self.root = path.parent()
+
+        self.name = dict["name"] as? String ?? ""
     }
 
+    mutating func update(withDependencies dependencies: [Project]) {
+        self.dependencies.append(contentsOf: dependencies)
+    }
+
+    mutating func update(withOutput output: Output) {
+        self.output = output
+    }
 }
 
 struct Paths {
@@ -94,27 +107,83 @@ enum Source {
     case projects([Project])
     case sources(Paths)
 
-    init(dict: [String: Any], relativePath: Path) throws {
-        if let projects = (dict["project"] as? [[String: Any]]) ?? (dict["project"] as? [String: Any]).map({ [$0] }) {
-            guard !projects.isEmpty else { throw Configuration.Error.invalidSources(message: "No projects provided.") }
-            self = try .projects(projects.map({ try Project(dict: $0, relativePath: relativePath) }))
-        } else if let sources = dict["sources"] {
-            do {
-                self = try .sources(Paths(dict: sources, relativePath: relativePath))
-            } catch {
-                throw Configuration.Error.invalidSources(message: "\(error)")
-            }
-        } else {
-            throw Configuration.Error.invalidSources(message: "'sources' or 'project' key are missing.")
-        }
-    }
-
     var isEmpty: Bool {
         switch self {
         case let .sources(paths):
             return paths.allPaths.isEmpty
         case let .projects(projects):
             return projects.isEmpty
+        }
+    }
+
+    static func create(with dict: [String: Any], relativePath: Path) throws -> Source {
+        if let projects = (dict["project"] as? [[String: Any]]) ?? (dict["project"] as? [String: Any]).map({ [$0] }) {
+            return try self.create(withProjects: projects, relativePath: relativePath)
+        } else if let sources = dict["sources"] {
+            return try self.create(withSources: sources, relativePath: relativePath)
+        } else {
+            throw Configuration.Error.invalidSources(message: "'sources' or 'project' key are missing.")
+        }
+    }
+
+    private static func create(withProjects projects: [[String: Any]], relativePath: Path) throws -> Source {
+        guard !projects.isEmpty else { throw Configuration.Error.invalidSources(message: "No projects provided.") }
+        let useDependencies = projects.contains(where: { $0["dependencies"] != nil })
+        let useSeparatedOutputs = projects.contains(where: { $0["output"] != nil })
+        let projectsObjects: [Project]
+        if useDependencies {
+            let names = projects.compactMap({ $0["name"] as? String })
+            guard names.count == projects.count else {
+                throw Configuration.Error.invalidSources(message: "In order to use dependencies all project configurations should contain name property.")
+            }
+            guard Set(names).count == projects.count else {
+                throw Configuration.Error.invalidSources(message: "In order to use dependencies all project configurations should use unique name.")
+            }
+            let dependencies = projects.map({ ($0["dependencies"] as? [String]) ?? [] })
+            let dependenciesMap = Dictionary(uniqueKeysWithValues: zip(names, dependencies))
+            let projectsMap = try projects.reduce([:], { (res, project) -> [String: Project] in
+                let project = try Project(dict: project, relativePath: relativePath)
+                return res.merging([project.name: project]) { (current, _) in current }
+            })
+            try names.forEach { (projectName) in
+                var unresolved = Set<String>()
+                var resolved = Set<String>()
+                try checkCircularDependencies(for: projectName, projectsMap: projectsMap, dependenciesMap: dependenciesMap, unresolved: &unresolved, resolved: &resolved)
+            }
+            names.forEach { (projectName) in
+                let dependencies = dependenciesMap[projectName]
+                var project = projectsMap[projectName]
+                project?.update(withDependencies: dependencies?.compactMap({ projectsMap[$0] }) ?? [])
+            }
+            if useSeparatedOutputs {
+                // TODO: update outputs per each project
+            }
+            projectsObjects = Array(projectsMap.values)
+        } else {
+            projectsObjects = try projects.map({ try Project(dict: $0, relativePath: relativePath) })
+        }
+        return .projects(projectsObjects)
+    }
+
+    private static func checkCircularDependencies(for projectName: String, projectsMap: [String: Project], dependenciesMap: [String: [String]], unresolved: inout Set<String>, resolved: inout Set<String>) throws {
+        unresolved.insert(projectName)
+        try dependenciesMap[projectName]?.forEach({ (dependency) in
+            if !resolved.contains(dependency) {
+                if unresolved.contains(dependency) {
+                    throw Configuration.Error.invalidSources(message: "Circular dependencies found for the \(projectName).")
+                }
+                try checkCircularDependencies(for: dependency, projectsMap: projectsMap, dependenciesMap: dependenciesMap, unresolved: &unresolved, resolved: &resolved)
+            }
+        })
+        resolved.insert(projectName)
+        unresolved.remove(projectName)
+    }
+
+    private static func create(withSources sources: Any, relativePath: Path) throws -> Source {
+        do {
+            return try .sources(Paths(dict: sources, relativePath: relativePath))
+        } catch {
+            throw Configuration.Error.invalidSources(message: "\(error)")
         }
     }
 }
@@ -136,6 +205,16 @@ struct Output {
             let projectPath = Path(project, relativeTo: relativePath)
             self.projectPath = projectPath
             self.project = try XcodeProj(path: projectPath)
+            self.target = target
+            self.group = dict["group"] as? String
+        }
+
+        init(project: Project, dict: [String: Any], relativePath: Path) throws {
+            guard let target = dict["target"] as? String else {
+                throw Configuration.Error.invalidOutput(message: "No target name provided.")
+            }
+            self.projectPath = project.root
+            self.project = project.file
             self.target = target
             self.group = dict["group"] as? String
         }
@@ -216,7 +295,7 @@ struct Configuration {
     }
 
     init(dict: [String: Any], relativePath: Path) throws {
-        let source = try Source(dict: dict, relativePath: relativePath)
+        let source = try Source.create(with: dict, relativePath: relativePath)
         guard !source.isEmpty else {
             throw Configuration.Error.invalidSources(message: "No sources provided.")
         }
